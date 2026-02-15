@@ -91,7 +91,7 @@ class AtorchAT24ConfigFlow(ConfigFlow, domain=DOMAIN):
                 },
             )
 
-        # Scan for compatible BLE devices
+        # Scan for BLE devices
         self._discovered_devices = {}
         configured_addresses = {
             entry.data["address"]
@@ -100,27 +100,47 @@ class AtorchAT24ConfigFlow(ConfigFlow, domain=DOMAIN):
         }
 
         # Get all discovered bluetooth devices from HA's scanner
-        service_infos = bluetooth.async_discovered_service_info(
-            self.hass, connectable=True
-        )
-        for info in service_infos:
-            if info.address in configured_addresses:
+        compatible: dict[str, str] = {}
+        other: dict[str, str] = {}
+
+        # Try both connectable and non-connectable to find all devices
+        seen_addresses: set[str] = set()
+        for connectable in (True, False):
+            try:
+                service_infos = bluetooth.async_discovered_service_info(
+                    self.hass, connectable=connectable
+                )
+            except Exception:
                 continue
-            # Match by name prefix or service UUID
-            if (
-                info.name
-                and info.name.startswith(DEVICE_NAME_PREFIX)
-            ) or SERVICE_UUID.lower() in [
-                str(u).lower() for u in info.service_uuids
-            ]:
-                label = f"{info.name or 'Unknown'} ({info.address})"
-                self._discovered_devices[info.address] = label
+            for info in service_infos:
+                if info.address in configured_addresses:
+                    continue
+                if info.address in seen_addresses:
+                    continue
+                seen_addresses.add(info.address)
 
-        if not self._discovered_devices:
-            # No devices found, go straight to manual entry
-            return await self.async_step_manual()
+                if not info.name or info.name.strip() == "":
+                    label = f"Unknown ({info.address})"
+                else:
+                    label = f"{info.name} ({info.address})"
 
-        # Add manual entry option at the end
+                # Check if this looks like a compatible device
+                is_compatible = False
+                if info.name and DEVICE_NAME_PREFIX in info.name:
+                    is_compatible = True
+                for uuid in info.service_uuids:
+                    if SERVICE_UUID.lower() in str(uuid).lower():
+                        is_compatible = True
+
+                if is_compatible:
+                    compatible[info.address] = f"⚡ {label}"
+                else:
+                    other[info.address] = label
+
+        # Compatible devices first, then others
+        self._discovered_devices = {**compatible, **other}
+
+        # Always show the form — manual option is always available
         device_options = dict(self._discovered_devices)
         device_options["__manual__"] = "✏️ Enter MAC address manually..."
 
