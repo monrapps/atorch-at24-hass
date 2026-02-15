@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="atorch-logo-png.png" alt="Atorch AT24" width="200">
+</p>
+
 # Atorch AT24 Energy Meter — Home Assistant Integration
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
