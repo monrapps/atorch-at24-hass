@@ -3,6 +3,13 @@
         "step": {
             "user": {
                 "title": "Atorch AT24 Energy Meter",
+                "description": "Select a discovered device or choose manual entry.",
+                "data": {
+                    "address": "Device"
+                }
+            },
+            "manual": {
+                "title": "Manual Setup",
                 "description": "Enter the Bluetooth MAC address of your Atorch AT24 device.",
                 "data": {
                     "address": "Bluetooth MAC Address",

@@ -7,13 +7,16 @@ from typing import Any
 
 import voluptuous as vol
 
+from homeassistant.components import bluetooth
 from homeassistant.components.bluetooth import BluetoothServiceInfoBleak
 from homeassistant.config_entries import ConfigFlow
 from homeassistant.data_entry_flow import FlowResult
 
-from .const import DOMAIN
+from .const import DOMAIN, SERVICE_UUID
 
 _LOGGER = logging.getLogger(__name__)
+
+DEVICE_NAME_PREFIX = "JDY-19"
 
 
 class AtorchAT24ConfigFlow(ConfigFlow, domain=DOMAIN):
@@ -26,6 +29,7 @@ class AtorchAT24ConfigFlow(ConfigFlow, domain=DOMAIN):
         self._discovery_info: BluetoothServiceInfoBleak | None = None
         self._address: str | None = None
         self._name: str | None = None
+        self._discovered_devices: dict[str, str] = {}
 
     async def async_step_bluetooth(
         self,
@@ -65,7 +69,76 @@ class AtorchAT24ConfigFlow(ConfigFlow, domain=DOMAIN):
         self,
         user_input: dict[str, Any] | None = None,
     ) -> FlowResult:
-        """Handle user-initiated setup (manual MAC address entry)."""
+        """Handle user-initiated setup: scan for devices or enter manually."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            address = user_input.get("address", "")
+
+            if address == "__manual__":
+                return await self.async_step_manual()
+
+            # User picked a discovered device
+            name = self._discovered_devices.get(address, "Atorch AT24")
+            await self.async_set_unique_id(address)
+            self._abort_if_unique_id_configured()
+
+            return self.async_create_entry(
+                title=name,
+                data={
+                    "address": address,
+                    "name": name,
+                },
+            )
+
+        # Scan for compatible BLE devices
+        self._discovered_devices = {}
+        configured_addresses = {
+            entry.data["address"]
+            for entry in self._async_current_entries()
+            if "address" in entry.data
+        }
+
+        # Get all discovered bluetooth devices from HA's scanner
+        service_infos = bluetooth.async_discovered_service_info(
+            self.hass, connectable=True
+        )
+        for info in service_infos:
+            if info.address in configured_addresses:
+                continue
+            # Match by name prefix or service UUID
+            if (
+                info.name
+                and info.name.startswith(DEVICE_NAME_PREFIX)
+            ) or SERVICE_UUID.lower() in [
+                str(u).lower() for u in info.service_uuids
+            ]:
+                label = f"{info.name or 'Unknown'} ({info.address})"
+                self._discovered_devices[info.address] = label
+
+        if not self._discovered_devices:
+            # No devices found, go straight to manual entry
+            return await self.async_step_manual()
+
+        # Add manual entry option at the end
+        device_options = dict(self._discovered_devices)
+        device_options["__manual__"] = "✏️ Enter MAC address manually..."
+
+        return self.async_show_form(
+            step_id="user",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("address"): vol.In(device_options),
+                }
+            ),
+            errors=errors,
+        )
+
+    async def async_step_manual(
+        self,
+        user_input: dict[str, Any] | None = None,
+    ) -> FlowResult:
+        """Handle manual MAC address entry."""
         errors: dict[str, str] = {}
 
         if user_input is not None:
@@ -84,7 +157,7 @@ class AtorchAT24ConfigFlow(ConfigFlow, domain=DOMAIN):
             )
 
         return self.async_show_form(
-            step_id="user",
+            step_id="manual",
             data_schema=vol.Schema(
                 {
                     vol.Required("address"): str,
