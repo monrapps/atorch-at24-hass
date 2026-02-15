@@ -1,0 +1,69 @@
+{
+    "config": {
+        "step": {
+            "user": {
+                "title": "Atorch AT24 Energy Meter",
+                "description": "Enter the Bluetooth MAC address of your Atorch AT24 device.",
+                "data": {
+                    "address": "Bluetooth MAC Address",
+                    "name": "Device Name"
+                }
+            },
+            "bluetooth_confirm": {
+                "title": "Atorch AT24 Discovered",
+                "description": "An Atorch AT24 Energy Meter ({name}) was discovered via Bluetooth. Do you want to set it up?"
+            }
+        },
+        "abort": {
+            "already_configured": "This device is already configured."
+        }
+    },
+    "entity": {
+        "sensor": {
+            "voltage": {
+                "name": "Voltage"
+            },
+            "current": {
+                "name": "Current"
+            },
+            "power": {
+                "name": "Power"
+            },
+            "energy": {
+                "name": "Energy"
+            },
+            "charge": {
+                "name": "Charge"
+            },
+            "frequency": {
+                "name": "Frequency"
+            },
+            "power_factor": {
+                "name": "Power Factor"
+            },
+            "temperature": {
+                "name": "Temperature"
+            },
+            "d_plus_voltage": {
+                "name": "D+ Voltage"
+            },
+            "d_minus_voltage": {
+                "name": "D- Voltage"
+            },
+            "on_time": {
+                "name": "On Time"
+            }
+        },
+        "button": {
+            "clear_all": {
+                "name": "Clear All"
+            },
+            "clear_capacity": {
+                "name": "Clear Capacity"
+            },
+            "clear_time": {
+                "name": "Clear Time"
+            }
+        }
+    }
+}

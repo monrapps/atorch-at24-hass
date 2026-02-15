@@ -1,0 +1,9 @@
+{
+    "name": "Atorch AT24 Energy Meter",
+    "render_readme": true,
+    "domains": [
+        "sensor",
+        "button"
+    ],
+    "iot_class": "local_push"
+}

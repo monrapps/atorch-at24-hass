@@ -1,0 +1,26 @@
+{
+    "domain": "atorch_at24",
+    "name": "Atorch AT24 Energy Meter",
+    "version": "1.0.0",
+    "documentation": "https://github.com/monra/atorch-at24-hass",
+    "issue_tracker": "https://github.com/monra/atorch-at24-hass/issues",
+    "dependencies": [
+        "bluetooth_adapters"
+    ],
+    "codeowners": [
+        "@monra"
+    ],
+    "config_flow": true,
+    "iot_class": "local_push",
+    "bluetooth": [
+        {
+            "local_name": "JDY-19",
+            "service_uuid": "0000ffe0-0000-1000-8000-00805f9b34fb",
+            "connectable": true
+        }
+    ],
+    "requirements": [
+        "bleak>=0.21.0",
+        "bleak-retry-connector>=3.1.0"
+    ]
+}
