@@ -201,7 +201,7 @@ class AtorchAT24ConfigFlow(ConfigFlow, domain=DOMAIN):
                 {
                     vol.Required(
                         CONF_UPDATE_INTERVAL,
-                        default=DEFAULT_UPDATE_INTERVAL,
+                        default=5,
                     ): vol.All(int, vol.Range(min=0, max=60)),
                 }
             ),

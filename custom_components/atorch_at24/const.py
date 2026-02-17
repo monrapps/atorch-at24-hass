@@ -80,4 +80,4 @@ RECONNECT_INTERVAL_S = 5
 
 # Update interval (throttle)
 CONF_UPDATE_INTERVAL = "update_interval"
-DEFAULT_UPDATE_INTERVAL = 5  # seconds
+DEFAULT_UPDATE_INTERVAL = 0  # seconds (0 = no throttle, instant updates)
