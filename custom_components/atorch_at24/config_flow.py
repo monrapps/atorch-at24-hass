@@ -9,10 +9,10 @@ import voluptuous as vol
 
 from homeassistant.components import bluetooth
 from homeassistant.components.bluetooth import BluetoothServiceInfoBleak
-from homeassistant.config_entries import ConfigFlow
+from homeassistant.config_entries import ConfigEntry, ConfigFlow, OptionsFlow
 from homeassistant.data_entry_flow import FlowResult
 
-from .const import DOMAIN, SERVICE_UUID
+from .const import CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL, DOMAIN, SERVICE_UUID
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -30,6 +30,13 @@ class AtorchAT24ConfigFlow(ConfigFlow, domain=DOMAIN):
         self._address: str | None = None
         self._name: str | None = None
         self._discovered_devices: dict[str, str] = {}
+
+    @staticmethod
+    def async_get_options_flow(
+        config_entry: ConfigEntry,
+    ) -> AtorchAT24OptionsFlow:
+        """Return the options flow handler."""
+        return AtorchAT24OptionsFlow(config_entry)
 
     async def async_step_bluetooth(
         self,
@@ -52,13 +59,7 @@ class AtorchAT24ConfigFlow(ConfigFlow, domain=DOMAIN):
     ) -> FlowResult:
         """Confirm Bluetooth discovery."""
         if user_input is not None:
-            return self.async_create_entry(
-                title=self._name or "Atorch AT24",
-                data={
-                    "address": self._address,
-                    "name": self._name,
-                },
-            )
+            return await self.async_step_settings()
 
         return self.async_show_form(
             step_id="bluetooth_confirm",
@@ -83,13 +84,9 @@ class AtorchAT24ConfigFlow(ConfigFlow, domain=DOMAIN):
             await self.async_set_unique_id(address)
             self._abort_if_unique_id_configured()
 
-            return self.async_create_entry(
-                title=name,
-                data={
-                    "address": address,
-                    "name": name,
-                },
-            )
+            self._address = address
+            self._name = name
+            return await self.async_step_settings()
 
         # Scan for BLE devices
         self._discovered_devices = {}
@@ -168,13 +165,9 @@ class AtorchAT24ConfigFlow(ConfigFlow, domain=DOMAIN):
             await self.async_set_unique_id(address)
             self._abort_if_unique_id_configured()
 
-            return self.async_create_entry(
-                title=name,
-                data={
-                    "address": address,
-                    "name": name,
-                },
-            )
+            self._address = address
+            self._name = name
+            return await self.async_step_settings()
 
         return self.async_show_form(
             step_id="manual",
@@ -185,4 +178,66 @@ class AtorchAT24ConfigFlow(ConfigFlow, domain=DOMAIN):
                 }
             ),
             errors=errors,
+        )
+
+    async def async_step_settings(
+        self,
+        user_input: dict[str, Any] | None = None,
+    ) -> FlowResult:
+        """Configure update interval before creating the entry."""
+        if user_input is not None:
+            return self.async_create_entry(
+                title=self._name or "Atorch AT24",
+                data={
+                    "address": self._address,
+                    "name": self._name,
+                    CONF_UPDATE_INTERVAL: user_input[CONF_UPDATE_INTERVAL],
+                },
+            )
+
+        return self.async_show_form(
+            step_id="settings",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_UPDATE_INTERVAL,
+                        default=DEFAULT_UPDATE_INTERVAL,
+                    ): vol.All(int, vol.Range(min=0, max=60)),
+                }
+            ),
+        )
+
+
+class AtorchAT24OptionsFlow(OptionsFlow):
+    """Handle options for Atorch AT24."""
+
+    def __init__(self, config_entry: ConfigEntry) -> None:
+        """Initialize options flow."""
+        self.config_entry = config_entry
+
+    async def async_step_init(
+        self,
+        user_input: dict[str, Any] | None = None,
+    ) -> FlowResult:
+        """Manage the options."""
+        if user_input is not None:
+            return self.async_create_entry(title="", data=user_input)
+
+        current = self.config_entry.options.get(
+            CONF_UPDATE_INTERVAL,
+            self.config_entry.data.get(
+                CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL
+            ),
+        )
+
+        return self.async_show_form(
+            step_id="init",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_UPDATE_INTERVAL,
+                        default=current,
+                    ): vol.All(int, vol.Range(min=0, max=60)),
+                }
+            ),
         )

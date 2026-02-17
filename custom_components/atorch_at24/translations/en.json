@@ -19,10 +19,33 @@
             "bluetooth_confirm": {
                 "title": "Atorch AT24 Discovered",
                 "description": "An Atorch AT24 Energy Meter ({name}) was discovered via Bluetooth. Do you want to set it up?"
+            },
+            "settings": {
+                "title": "Update Settings",
+                "description": "Configure how often sensor states are saved to history.",
+                "data": {
+                    "update_interval": "State update interval (seconds)"
+                },
+                "data_description": {
+                    "update_interval": "How often sensor states are saved to history. Lower values mean more responsive cards but more data stored. Set to 0 to disable throttling (save every reading)."
+                }
             }
         },
         "abort": {
             "already_configured": "This device is already configured."
+        }
+    },
+    "options": {
+        "step": {
+            "init": {
+                "title": "Atorch AT24 Options",
+                "data": {
+                    "update_interval": "State update interval (seconds)"
+                },
+                "data_description": {
+                    "update_interval": "How often sensor states are saved to history. Lower values mean more responsive cards but more data stored. Set to 0 to disable throttling (save every reading)."
+                }
+            }
         }
     },
     "entity": {

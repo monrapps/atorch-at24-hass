@@ -15,6 +15,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .const import (
     CHARACTERISTIC_UUID,
+    DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
     NOTIFICATION_TIMEOUT_S,
     RECONNECT_INTERVAL_S,
@@ -36,6 +37,7 @@ class AtorchBLECoordinator(DataUpdateCoordinator[AtorchMeterData | None]):
         hass: HomeAssistant,
         address: str,
         name: str,
+        update_interval: int = DEFAULT_UPDATE_INTERVAL,
     ) -> None:
         """Initialize the coordinator."""
         super().__init__(
@@ -45,12 +47,24 @@ class AtorchBLECoordinator(DataUpdateCoordinator[AtorchMeterData | None]):
         )
         self.address = address
         self._device_name = name
+        self._update_interval = update_interval
+        self._last_update_time: float = 0
         self._client: BleakClient | None = None
         self._buffer: bytearray = bytearray()
         self._expected_disconnect = False
         self._connect_lock = asyncio.Lock()
         self._watchdog_task: asyncio.Task | None = None
         self._last_data_time: float = 0
+
+    @property
+    def update_interval_seconds(self) -> int:
+        """Return the current state update interval."""
+        return self._update_interval
+
+    @update_interval_seconds.setter
+    def update_interval_seconds(self, value: int) -> None:
+        """Set the state update interval."""
+        self._update_interval = value
 
     @property
     def device_name(self) -> str:
@@ -158,8 +172,17 @@ class AtorchBLECoordinator(DataUpdateCoordinator[AtorchMeterData | None]):
             self._buffer.clear()
 
             if parsed is not None:
-                self._last_data_time = asyncio.get_event_loop().time()
-                self.async_set_updated_data(parsed)
+                now = asyncio.get_event_loop().time()
+                self._last_data_time = now
+                # Always keep latest data available
+                self.data = parsed
+                # Only push state update if enough time has passed
+                if (
+                    self._update_interval <= 0
+                    or now - self._last_update_time >= self._update_interval
+                ):
+                    self._last_update_time = now
+                    self.async_set_updated_data(parsed)
 
     async def _update_method(self) -> AtorchMeterData | None:
         """Not used — data arrives via BLE notifications."""

@@ -77,3 +77,7 @@ CHECKSUM_XOR = 0x44
 # Reconnection / timeout
 NOTIFICATION_TIMEOUT_S = 60
 RECONNECT_INTERVAL_S = 5
+
+# Update interval (throttle)
+CONF_UPDATE_INTERVAL = "update_interval"
+DEFAULT_UPDATE_INTERVAL = 5  # seconds
