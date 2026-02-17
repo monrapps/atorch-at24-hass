@@ -34,9 +34,9 @@ class AtorchAT24ConfigFlow(ConfigFlow, domain=DOMAIN):
     @staticmethod
     def async_get_options_flow(
         config_entry: ConfigEntry,
-    ) -> AtorchAT24OptionsFlow:
+    ) -> OptionsFlow:
         """Return the options flow handler."""
-        return AtorchAT24OptionsFlow(config_entry)
+        return AtorchAT24OptionsFlow()
 
     async def async_step_bluetooth(
         self,
@@ -210,10 +210,6 @@ class AtorchAT24ConfigFlow(ConfigFlow, domain=DOMAIN):
 
 class AtorchAT24OptionsFlow(OptionsFlow):
     """Handle options for Atorch AT24."""
-
-    def __init__(self, config_entry: ConfigEntry) -> None:
-        """Initialize options flow."""
-        self.config_entry = config_entry
 
     async def async_step_init(
         self,
