@@ -147,6 +147,7 @@ class DataUpdateCoordinatorDouble:
         self.async_update_listeners()
 
     def async_set_update_error(self, error):
+        self.last_exception = error
         was_successful = self.last_update_success
         self.last_update_success = False
         if was_successful:
@@ -157,8 +158,15 @@ class DataUpdateCoordinatorDouble:
         raise NotImplementedError("push-only coordinator has no update_method")
 
     async def async_request_refresh(self):
+        # HA 2026.9.4 _async_refresh re-raises NotImplementedError BEFORE its
+        # listener block. Do not turn that path into async_set_update_error:
+        # last_update_success can be false while listeners still hold a value.
         try:
             data = await self._async_update_data()
+        except NotImplementedError as error:
+            self.last_exception = error
+            self.last_update_success = False
+            raise
         except Exception as error:
             self.async_set_update_error(error)
         else:

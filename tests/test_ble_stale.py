@@ -654,11 +654,12 @@ class AvailabilityTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(c.publications, count + 1)
                 self.assertIsNone(c._publish_handle)
 
-    async def test_P37_actual_refresh_hook_cannot_restore_cache(self):
+    async def test_P37_default_refresh_hook_cannot_restore_cache(self):
         await self.sample()
         self.h.clients[-1].drop()
         await self.c._connect()
-        await self.c.async_request_refresh()  # HA public path, not _update_method
+        with self.assertRaises(NotImplementedError):
+            await self.c.async_request_refresh()  # double, not full HA service
         self.assert_unavailable()
         self.assertIsNone(self.c._last_data_time)
         self.h.emit(200)
@@ -668,11 +669,99 @@ class AvailabilityTests(unittest.IsolatedAsyncioTestCase):
         # Refresh error while a flush is pending must not be undone by the flush.
         self.h.clock.now = 1
         self.h.emit(300)
-        await self.c.async_request_refresh()
+        with self.assertRaises(NotImplementedError):
+            await self.c.async_request_refresh()
         await self.h.advance(60)
+        self.assertFalse(self.h.power.available)
+        self.assertEqual(self.h.published_state, "200.0")
+        self.assertNotIn("300.0", self.h.state_history)  # flush did not recover
+        await self.h.advance(61)  # TTL of the suppressed frame, not last publish
         self.assert_unavailable()
         self.h.emit(400)
         self.assertEqual(self.h.published_state, "400.0")
+
+    async def test_P37b_unnotified_refresh_error_then_loss_publishes_once(self):
+        for pending in (False, True):
+            for loss in ("disconnect", "expiry", "stop"):
+                with self.subTest(pending=pending, loss=loss):
+                    async with Harness(60) as h:
+                        c = h.coordinator
+                        await c._connect()
+                        h.emit(100)
+                        if pending:
+                            h.clock.now = 1
+                            h.emit(200)
+                        snapshot = c.data
+                        deadline = c._expiry_handle.when
+                        callbacks = list(h.clock.active)
+                        for _ in range(2):
+                            with self.assertRaises(NotImplementedError):
+                                await c.async_request_refresh()
+                        self.assertFalse(c.last_update_success)
+                        self.assertIsInstance(c.last_exception, NotImplementedError)
+                        self.assertEqual(h.state_history, ["100.0"])
+                        self.assertIs(c.data, snapshot)
+                        if loss == "disconnect":
+                            h.clients[-1].drop()
+                        elif loss == "expiry":
+                            await h.advance(deadline)
+                        else:
+                            await c.async_stop()
+                        self.assert_unavailable(h)
+                        self.assertIs(c.data, snapshot)
+                        self.assertEqual(h.state_history, ["100.0", "unavailable"])
+                        for timer in callbacks:
+                            timer.fire()  # cancelled expiry/flush cannot republish
+                        c._invalidate("repeat invalidation")
+                        self.assertEqual(c.publications, 2)
+                        if loss != "stop":
+                            await c._connect()
+                            self.assert_unavailable(h)
+                            h.emit(300)
+                            self.assertEqual(h.state_history,
+                                             ["100.0", "unavailable", "300.0"])
+                            self.assertIn("216,0 kWh/mês", h.projection())
+
+    async def test_P37c_notified_error_then_loss_does_not_duplicate(self):
+        for loss in ("disconnect", "expiry", "stop"):
+            with self.subTest(loss=loss):
+                async with Harness(60) as h:
+                    c = h.coordinator
+                    await c._connect()
+                    h.emit(100)
+                    h.clock.now = 1
+                    h.emit(200)
+                    c.async_set_update_error(UpdateFailed("ordinary error"))
+                    self.assert_unavailable(h)
+                    self.assertEqual(h.state_history, ["100.0", "unavailable"])
+                    if loss == "disconnect":
+                        h.clients[-1].drop()
+                    elif loss == "expiry":
+                        await h.advance(61)
+                    else:
+                        await c.async_stop()
+                    c._invalidate("repeat invalidation")
+                    self.assert_unavailable(h)
+                    self.assertEqual(c.publications, 2)
+
+    async def test_P37d_new_frame_recovers_refresh_error_before_loss(self):
+        await self.sample(100)
+        self.h.clock.now = 1
+        self.h.emit(200)
+        old_expiry = self.c._expiry_handle
+        old_flush = self.c._publish_handle
+        with self.assertRaises(NotImplementedError):
+            await self.c.async_request_refresh()
+        self.h.clock.now = 2
+        self.h.emit(300)
+        self.assertEqual(self.h.state_history, ["100.0", "300.0"])
+        self.assertEqual(self.c._expiry_handle.when, 62)
+        old_expiry.fire()
+        old_flush.fire()
+        self.assertTrue(self.h.power.available)
+        await self.h.advance(62)
+        self.assert_unavailable()
+        self.assertEqual(self.h.state_history, ["100.0", "300.0", "unavailable"])
 
 
 async def trace():

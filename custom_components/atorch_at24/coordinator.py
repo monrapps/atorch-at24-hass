@@ -42,6 +42,7 @@ class AtorchBLECoordinator(DataUpdateCoordinator[AtorchMeterData | None]):
         self._device_name = name
         self._update_interval = update_interval
         self.last_update_success = False
+        self._last_notified_success = False
         self._last_update_time: float | None = None
         self._last_data_time: float | None = None
         self._connected_since: float | None = None
@@ -105,14 +106,24 @@ class AtorchBLECoordinator(DataUpdateCoordinator[AtorchMeterData | None]):
             self._publish_handle.cancel()
             self._publish_handle = None
 
+    @callback
+    def async_update_listeners(self) -> None:
+        """Track the status actually sent to listeners, including HA errors."""
+        self._last_notified_success = self.last_update_success
+        super().async_update_listeners()
+
     def _invalidate(self, reason: str) -> None:
         """Retain the snapshot, but invalidate it before notifying listeners."""
         self._last_data_time = None
         self._buffer.clear()
         self._cancel_expiry()
         self._cancel_publish()
-        # HA notifies only on the success -> error transition. Do not pre-clear it.
+        # HA normally notifies on success -> error. A failing refresh hook can
+        # pre-clear success and re-raise without notifying, so track publication
+        # separately. Never duplicate an error transition HA already published.
         self.async_set_update_error(UpdateFailed(reason))
+        if self._last_notified_success:
+            self.async_update_listeners()
 
     def _end_session(self, reason: str) -> BleakClient | None:
         """Fence queued BLE callbacks before any asynchronous cleanup."""

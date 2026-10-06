@@ -33,6 +33,10 @@ Production scope is `coordinator.py`, `sensor.py`, and `button.py` only.
 - Disconnect invalidates and notifies listeners synchronously before scheduling
   reconnect. Reconnecting without a frame cannot restore cached values. First
   frame/recovery and mode changes publish immediately, regardless of throttle.
+  Notification status is tracked separately from `last_update_success`: HA may
+  clear success on a refresh exception without reaching its listener block. Loss,
+  expiry and stop still publish unavailable once; already-notified errors do not
+  produce duplicate transitions.
 - Every accepted frame, including identical values and legitimate zero, renews
   the TTL. Partial chunks, rejected frames, ACKs, connections, publication,
   commands and manual refresh never renew it.
@@ -102,7 +106,7 @@ scheduler supplies sleep completions and timer callbacks. Cancelled callbacks ca
 be deliberately invoked to simulate an already-queued callback. The module loader
 restores `sys.modules`; harnesses must be run sequentially, not in concurrent threads.
 
-Results executed locally: 11 parser tests and 38 availability tests passed with
+Results executed locally after the R1 revision: 11 parser tests and 41 availability tests passed with
 warnings as errors. The negative-control runner verifies exactly seven assertion
 failures and zero errors against unchanged master: P01, P04, P05, P06, P08, P20,
 P34. A missing API, import failure or teardown exception is not accepted as evidence.
@@ -114,7 +118,8 @@ CI results must be read at the exact published SHA, not inferred from local test
 ## Coverage map (policy P01–P37)
 
 Test method names carry the normative scenario IDs and expand variants via
-subtests. There are 37 policy IDs and one additional cleanup-race regression P29b.
+subtests. There are 37 policy IDs plus cleanup-race regression P29b and refresh
+publication regressions P37b/P37c/P37d (41 test methods).
 
 | IDs | Executed cases |
 |---|---|
@@ -128,7 +133,8 @@ subtests. There are 37 policy IDs and one additional cleanup-race regression P29
 | P29, P29b | Stop drains tasks/timers, idempotence, stop during suspended stop-notify and disconnect, no connected client left behind |
 | P30–P31 | Late connector return after stop, establish/subscribe failure then recovery |
 | P32–P34 | Option changes including zero, buttons/direct GATT guard and unchanged command format, coordinator errors respected |
-| P35–P37 | Civil-clock jumps, superseded flush in the same BLE session, actual public manual-refresh path and next-frame recovery |
+| P35–P37 | Civil-clock jumps, superseded flush in the same BLE session, default refresh hook boundary and next-frame recovery |
+| P37b–P37d | Unnotified refresh error followed by disconnect/expiry/stop, with/without pending flush; repeated invalidation and notified-error idempotence; new-frame recovery before/after loss |
 
 Independent read-only review repeated parser/regression tests and baseline controls.
 It found a cancellation race during detached-client cleanup. P29b first failed with
@@ -141,9 +147,56 @@ This expands the original doubles, whose BLE close methods never suspended.
 
 The pre-existing `_update_method` method is not the HA `_async_update_data` hook;
 manual refresh is not a polling acquisition path. P37 invokes `async_request_refresh`
-through a boundary double of HA's default hook/error behavior: it cannot restore
-invalid cache, and a valid current frame recovers immediately. This change does
-not claim to fix the unrelated manual-refresh hook or add polling.
+through a boundary double, not the real HA service/debouncer. The double models
+the default hook's `NotImplementedError` by clearing success and re-raising without
+notifying, as in [HA 2026.9.4 `_async_refresh`](https://github.com/home-assistant/core/blob/2026.9.4/homeassistant/helpers/update_coordinator.py#L555-L598).
+It is not a model of every HA refresh exception or scheduling path.
+
+### R1: refresh can clear success without publishing the error
+
+The independent downstream review rejected the original candidate
+`ba80a92292690c7b6aec0d294a3694af400ec253` despite its green CI. Its refresh double
+incorrectly swallowed every exception and called `async_set_update_error`, masking
+the real default hook's unnotified error. Earlier P37 results did not establish
+correct publication after this refresh path.
+
+Reproduction: I=60, publish 100 W at t=0, receive a suppressed 200 W at t=1,
+then invoke the default refresh hook and catch `NotImplementedError`. Without the
+R1 correction, disconnect or TTL t=61 leaves the listener's state at 100 W and
+projection at 72,0 kWh/month, even though the entity properties are unavailable.
+The pending flush at t=60 must not restore the 200 W cache or renew TTL.
+
+The correction records the success state when listeners are actually notified.
+Invalidation keeps HA's normal error path and explicitly notifies only if the last
+notification still reported success. P37b covers disconnect, TTL and stop both
+with/without pending flush, repeated refresh/invalidation, cancelled callbacks,
+and recovery only on a new frame. P37c verifies no duplicate after an ordinary
+already-published error; P37d covers a new frame before loss and old timers.
+
+Before changing production code, the corrected double plus 41-test suite produced
+seven assertion failures (P37 and six P37b subcases), zero errors. They all pass
+with this revision. To repeat the R1 negative control using these tests:
+
+```sh
+git worktree add --detach ../atorch-before-r1 ba80a92292690c7b6aec0d294a3694af400ec253
+# Expected exit 1: seven assertion failures, not import/teardown errors.
+ATORCH_SOURCE_ROOT=../atorch-before-r1 .venv/bin/python -W error tests/test_ble_stale.py -v
+```
+
+An additional review probe compiles the unmodified `_async_update_data` and
+`_async_refresh` method bodies from public HA 2026.9.4 source over the real AT24
+coordinator with other boundaries stubbed. It independently reproduced two
+assertion failures (disconnect/TTL) before the fix and passed all three tests after
+the fix, including an ordinary `UpdateFailed` control. This is source-level boundary
+verification, not a full HA runtime test; the probe and execution logs are retained
+with the task evidence. Source SHA-256:
+`bd4b64d5b1ac623f29e70b1961023c28f562b61a77370a746159c3fd4a411ae0`.
+
+The refresh exception itself remains pre-existing: there is no new acquisition
+hook or polling. An unnotified refresh failure can leave the last numeric published
+state until a new frame, disconnect, TTL or stop; the 60-second deadline is never
+extended. This patch guarantees publication at loss/expiry, not immediate HA service
+error rendering. Only a valid current-session frame restores successful availability.
 
 ## Projection trace and fixture provenance
 
@@ -178,6 +231,7 @@ real-time guarantees or actual device sampling accuracy is made. BLE cleanup sti
 depends on the underlying transport eventually completing or raising; the doubles
 test controlled suspension/cancellation, not a permanently hung Bluetooth stack.
 
-No household values, private endpoints, production configuration or hardware were
+No household measurements, private endpoints, production configuration or hardware were
 used. No merge, auto-merge or deployment is part of this delivery. The implementation
-PR is separate from PR #1; downstream task `t_c900cd22` re-verifies it in a fresh run.
+PR is separate from PR #1; task `t_c900cd22` performs the independent verification
+and R1 revision in the existing PR #3, not a duplicate PR.
