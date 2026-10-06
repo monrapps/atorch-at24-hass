@@ -62,6 +62,12 @@ The integration supports two setup methods:
 - **Automatic** — If Bluetooth is enabled, the device will be discovered automatically. A notification will appear to confirm setup.
 - **Manual** — Go to Settings → Devices & Services → Add Integration → search "Atorch AT24" and enter the device's Bluetooth MAC address.
 
+## Dashboard examples
+
+- [Server Room monthly energy estimate](examples/lovelace/README.md): a native
+  Lovelace card projecting current power over 30 days, with unavailable-state
+  handling. No integration update or additional sensor is needed.
+
 ## Protocol
 
 Based on the [reverse engineering notes](https://github.com/devanlai/webvoltmeter/blob/master/REVERSE.md) by [@devanlai](https://github.com/devanlai).
