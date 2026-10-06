@@ -1,4 +1,4 @@
-name: BLE stale-data characterization
+name: BLE availability regressions
 
 on:
   push:
@@ -11,12 +11,23 @@ jobs:
   ble-stale-repro:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    strategy:
+      matrix:
+        python-version: ['3.11', '3.14']
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: ${{ matrix.python-version }}
       - run: python -m pip install -r tests/requirements-ble-stale.txt
-      - run: python tests/test_parser.py
+      - run: python -W error tests/test_parser.py
       - run: python -W error tests/test_ble_stale.py -v
-      - run: python tests/test_ble_stale.py --trace
+      - run: python -W error tests/test_ble_stale.py --trace
+      - name: Prove unchanged baseline fails the regression assertions
+        run: |
+          git worktree add --detach ../atorch-baseline 297075d86360741ad9b3d122b23c3a20be38abfa
+          ATORCH_SOURCE_ROOT=../atorch-baseline python -W error tests/check_baseline_regressions.py
+      - run: python -m compileall -q custom_components tests
+      - run: git diff --check 297075d86360741ad9b3d122b23c3a20be38abfa HEAD

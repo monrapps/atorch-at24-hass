@@ -200,16 +200,19 @@ class AtorchSensorEntity(
 
     @property
     def available(self) -> bool:
-        """Return whether this sensor has received data in the current mode."""
+        """Require a successful, fresh sample in a supported device mode."""
         data = self.coordinator.data
-        if data is None:
-            return False
-        return data.mode in self.entity_description.available_modes
+        return (
+            super().available
+            and self.coordinator.has_fresh_data
+            and data is not None
+            and data.mode in self.entity_description.available_modes
+        )
 
     @property
     def native_value(self) -> float | int | None:
         """Return the sensor value."""
         data = self.coordinator.data
-        if data is None:
+        if data is None or not self.available:
             return None
         return self.entity_description.value_fn(data)
