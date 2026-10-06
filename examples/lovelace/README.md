@@ -4,6 +4,11 @@ This optional Lovelace example projects the **current power** over a fixed
 30-day month. It is not historical energy, an Energy Dashboard total, or a bill.
 The integration and its BLE measurements are unchanged.
 
+For the optional 24-hour / 7-day / 30-day historical-base projections alongside
+this instantaneous estimate, see [Historical projections](historical-projections.md).
+That extension requires a native SQL helper and explicitly discloses hourly
+resolution, bucket coverage and the recorder's internal-gap limitations.
+
 ## Source and calculation
 
 Confirm the entity in Developer Tools → States before installing. The target
