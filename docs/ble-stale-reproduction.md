@@ -15,10 +15,30 @@ expected the bug; this branch replaces it with assertions of the required behavi
 The historical reproduction and its documentation remain available at that SHA.
 
 The monthly-estimate [PR #1](https://github.com/monrapps/atorch-at24-hass/pull/1)
-is **not** a dependency of the production fix and is not included in the branch.
-Only its frozen Jinja test fixture is reused. No dashboard, entity ID, unit,
-precision, state class, parser/protocol, config flow or runtime dependency changes.
-Production scope is `coordinator.py`, `sensor.py`, and `button.py` only.
+is **not** a dependency of the production fix. Initially only its frozen Jinja test
+fixture was reused. The branch now incorporates `master` at
+`ab5394dc4c81c31fd22c91486a30db1646d3e860`, including the already-merged monthly
+and historical projection PRs #1/#4 and characterization PR #2. Their examples,
+scripts, tests and non-BLE CI are preserved unchanged. Relative to that target,
+this fix makes no dashboard, entity ID, unit, precision, state class,
+parser/protocol, config flow or runtime dependency changes. Production scope
+remains `coordinator.py`, `sensor.py`, and `button.py` only.
+
+### Reconciliation with the merged characterization
+
+PR #2's tree at `c0fb43f83abed625c1a137911c0ac39babe3a240` is identical to its
+cherry-pick `cde3a080177ac49716a865aacadcb894948fdd40` in this branch. Its six
+characterization files were unchanged on the current target. Merging the target
+therefore produced four add/add conflicts in the BLE workflow, this document,
+`tests/ble_stale_doubles.py` and `tests/test_ble_stale.py`: independent Git
+histories for the same original files, followed by this fix's intentional evolution.
+
+The resolution retains the regression versions, including the Python 3.11/3.14
+matrix, negative controls, lifecycle tests and R1 refresh/publication correction.
+Restoring the target's old assertions would require the stale-data bug to remain.
+The original characterization is still reproducible from the pinned PR #2 commit;
+the unchanged fixture and requirement file merge identically. No independent
+change from the target was discarded.
 
 ## Adopted policy
 

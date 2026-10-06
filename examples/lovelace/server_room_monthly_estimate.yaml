@@ -1,0 +1,15 @@
+# Insert immediately after the Server Room entities card in its vertical-stack.
+# Native Markdown card: no custom frontend resource or template sensor required.
+type: markdown
+entity_id:
+  - sensor.atorch_at24_power
+card_size: 4
+content: |-
+  {% set power = states('sensor.atorch_at24_power') -%}
+  {% set unit = state_attr('sensor.atorch_at24_power', 'unit_of_measurement') -%}
+  {% set to_kw = {'W': 0.001, 'kW': 1} -%}
+  {% set monthly = (power | float * to_kw[unit] * 24 * 30) if is_number(power) and unit in to_kw else none -%}
+  **Consumo mensal estimado:** {% if is_number(monthly) %}{{ ('%.1f' | format(monthly)) | replace('.', ',') }} kWh/mês{% else %}Indisponível{% endif %}
+
+  Potência atual constante, 24 h/dia, mês de 30 dias.
+  Projeção, não consumo histórico medido nem custo financeiro.

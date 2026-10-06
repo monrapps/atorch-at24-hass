@@ -1,0 +1,33 @@
+# Replaces only the previous instantaneous Markdown card; keeps all other cards.
+# Native SQL sensor setup is described in historical-projections.md.
+type: markdown
+entity_id:
+  - sensor.atorch_at24_power
+  - sensor.atorch_monthly_projections
+card_size: 8
+content: |-
+  {% set power = states('sensor.atorch_at24_power') -%}
+  {% set unit = state_attr('sensor.atorch_at24_power', 'unit_of_measurement') -%}
+  {% set to_kw = {'W': 0.001, 'kW': 1} -%}
+  {% set monthly = (power | float * to_kw[unit] * 24 * 30) if is_number(power) and unit in to_kw else none -%}
+  **Consumo mensal estimado** — mês de 30 dias, 24 h/dia.
+
+  **Base: potência atual** — {% if is_number(monthly) %}{{ ('%.1f' | format(monthly)) | replace('.', ',') }} kWh/mês{% else %}Indisponível{% endif %}
+
+  {% set helper = 'sensor.atorch_monthly_projections' -%}
+  {% set computed = state_attr(helper, 'computed_at') -%}
+  {% set age = as_timestamp(now()) - (computed | float) if is_number(computed) else none -%}
+  {% set ready = is_number(age) and 0 <= age <= 120 and state_attr(helper, 'method') == 'recorded_hourly_statistics_v1' and state_attr(helper, 'unit_of_measurement') == 'kWh/mês' and states(helper) != 'unavailable' -%}
+  {% for key, label in [('24h', 'últimas 24 h'), ('7d', 'últimos 7 dias'), ('30d', 'últimos 30 dias')] -%}
+  {% set value = state_attr(helper, 'monthly_' ~ key) -%}
+  {% set coverage = state_attr(helper, 'coverage_' ~ key) -%}
+  **Base: {{ label }}** — {% if ready and is_number(value) and is_number(coverage) and 90 <= coverage | float <= 100 %}≈ {{ ('%.1f' | format(value | float)) | replace('.', ',') }} kWh/mês{% else %}Indisponível / dados insuficientes{% endif %}
+
+  Cobertura de blocos: {% if ready and is_number(coverage) %}{{ ('%.1f' | format(((coverage | float * 10) | round(0, 'floor')) / 10)) | replace('.', ',') }}%{% if coverage | float < 100 %} (parcial){% endif %}{% else %}indisponível{% endif %}.
+
+  {% endfor -%}
+  Históricas: médias horárias do recorder, ponderadas pelo tempo na janela; mínimo de 90% dos blocos. Hora em curso e blocos ausentes não são zero.
+
+  Resolução de 1 h; aproximação, não disponibilidade verificada. Lacunas dentro de um bloco podem carregar leituras anteriores no recorder.
+
+  Potência atual constante na primeira linha; média histórica nas demais. Projeção, não consumo histórico medido nem custo financeiro.
