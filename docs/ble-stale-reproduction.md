@@ -1,162 +1,183 @@
-# AT24 stale availability: executable characterization
+# AT24 BLE availability: reproduction and regression verification
 
 ## Scope and baseline
 
-This reproduces an existing defect, **not a fix**. Passing characterization tests
-mean the stale behavior is still present; they must be replaced/adapted to the
-approved availability policy when implementing the fix. No production integration
-code is changed by this work.
+This branch fixes the pre-existing stale-availability defect in `master`
+`297075d86360741ad9b3d122b23c3a20be38abfa`. Master was synchronized with
+`git fetch origin` and `git pull --ff-only origin master` before the isolated
+implementation worktree was created. Branch: `task/t_96111faf-ble-availability`.
 
-Baseline: `master` at `297075d86360741ad9b3d122b23c3a20be38abfa`, verified after
-`git pull --ff-only origin master`, before creating isolated branch
-`task/t_76f7a9a0-ble-stale-repro` (task `t_76f7a9a0`). The monthly-estimate
-PR #1 is not in this baseline. The coordinator/sensor behavior predates that PR;
-this is not a regression caused by the estimate.
+The executable characterization from [PR #2](https://github.com/monrapps/atorch-at24-hass/pull/2),
+commit `c0fb43f83abed625c1a137911c0ac39babe3a240`, was explicitly cherry-picked
+before implementing the fix. Its 11 characterization tests and the existing
+11 parser tests passed before production code was changed. The old characterization
+expected the bug; this branch replaces it with assertions of the required behavior.
+The historical reproduction and its documentation remain available at that SHA.
 
-The tests import the actual `const.py`, `parser.py`, `coordinator.py`, and
-`sensor.py`. Only HA/BLE boundaries, the clock, task scheduling and a tiny state
-publisher are doubles. Synthetic 36-byte packets are delivered as 20+16 byte
-notifications through the registered callback, with the real parser and sensor
-properties. No household address, endpoint or configuration is used.
+The monthly-estimate [PR #1](https://github.com/monrapps/atorch-at24-hass/pull/1)
+is **not** a dependency of the production fix and is not included in the branch.
+Only its frozen Jinja test fixture is reused. No dashboard, entity ID, unit,
+precision, state class, parser/protocol, config flow or runtime dependency changes.
+Production scope is `coordinator.py`, `sensor.py`, and `button.py` only.
 
-## Run locally
+## Adopted policy
 
-From this branch's repository root, with Python 3.11 or newer:
+- Start unavailable. A BLE connection is not a measurement.
+- A sample is usable only while the current client is connected, the coordinator
+  is not stopping, and a complete valid frame from this session was received less
+  than 60 seconds ago. Coordinator success is also required by sensors/buttons.
+- Use the existing `NOTIFICATION_TIMEOUT_S = 60` as a fixed monotonic TTL, with no
+  new setting. Compare against the absolute deadline (`last_valid_at + 60`), so
+  floating-point subtraction cannot rearm an already-due timer in a tight loop.
+  Timestamp zero is valid; `None` means no usable observation.
+- Disconnect invalidates and notifies listeners synchronously before scheduling
+  reconnect. Reconnecting without a frame cannot restore cached values. First
+  frame/recovery and mode changes publish immediately, regardless of throttle.
+- Every accepted frame, including identical values and legitimate zero, renews
+  the TTL. Partial chunks, rejected frames, ACKs, connections, publication,
+  commands and manual refresh never renew it.
+- A one-shot deadline publishes unavailable even without another BLE event.
+  Entity availability checks the deadline as well, in case the event loop is late.
+  Early callbacks rearm; superseded session/timer callbacks are inert.
+- Retain `coordinator.data` only as an invalid private snapshot on loss. All 11
+  sensors return `native_value=None` while unavailable. No synthetic zero, reset,
+  interpolation, backfill or modification of existing recorder history.
+- Mode restrictions are preserved: voltage/current/energy/temperature in 1/2/3;
+  power/frequency/power-factor only in 1; charge in 2/3; USB voltages/on-time in 3.
+- All three buttons require coordinator success and fresh data. The send routine
+  also refuses a direct GATT write without a current mode. Command bytes remain
+  unchanged; command tests use a fake client exclusively.
+- Publication throttle (0–60 s) is separate from measurement TTL. A suppressed
+  latest sample is flushed at the throttle deadline even if no next frame arrives,
+  only while fresh. Publication never renews TTL. Expiry wins if deadlines coincide.
+  An option change recalculates only the pending publication; immediate publication
+  consumes it. Generation guards prevent an already-queued superseded flush from
+  publishing twice. A coordinator/refresh error cannot be undone by that flush.
+- Keep the 60-second transport watchdog and 5-second reconnect delay. There is one
+  shared connection attempt and one scheduled reconnect; the latter rechecks its
+  reason before disconnecting. Connection-start time is separate from sample time.
+  TTL expiry is immediate at the deadline; physical recovery can wait for watchdog.
+- Stop invalidates first, cancels timers/reconnect/watchdog/connection attempts,
+  and drains them. A client returned after cancellation is closed, not installed.
+  Cleanup tasks retain ownership even after a detached client's parent reconnect
+  is cancelled; stop waits for actual close completion. Repeated stop is safe.
+- BLE callbacks carry their session generation. Old disconnects cannot clear a new
+  client; chunks cannot cross sessions. Metadata is installed before `start_notify`
+  because frames may arrive during subscription. Failure invalidates and closes the
+  partially installed client.
+
+The policy uses the software's existing 60 s silence budget, not the configured
+HA throttle or a claimed hardware measurement. Compatible protocol-family projects
+report approximately 1 status frame/s:
+[ESPHome example](https://github.com/syssi/esphome-atorch-dl24/blob/92bac948e39ce2c9aa569b88129ad9d830c1125b/esp32-ac-meter-example.yaml#L57-L63),
+[Atorch protocol notes](https://github.com/tshaddack/dl24/blob/4dcab3d28a63a19268032feda86215532462f23f/README.md).
+The [original reverse notes](https://github.com/devanlai/webvoltmeter/blob/44621efde8581408cdbac5f4567d7a78c61879e7/REVERSE.md)
+define framing, not a cadence guarantee. No physical cadence was measured; legitimate
+firmware gaps of 60 s or more would need separate evidence and policy review.
+“Valid” means accepted by the existing parser, which does not verify notification
+checksums; checksum/protocol changes are outside this fix.
+
+## Reproduce the positive and negative controls
+
+Python 3.11 or newer, from this branch's root:
 
 ```sh
 python3 -m venv .venv
 .venv/bin/python -m pip install -r tests/requirements-ble-stale.txt
-.venv/bin/python tests/test_parser.py
+.venv/bin/python -W error tests/test_parser.py
 .venv/bin/python -W error tests/test_ble_stale.py -v
-.venv/bin/python tests/test_ble_stale.py --trace
+.venv/bin/python -W error tests/test_ble_stale.py --trace
+.venv/bin/python -m compileall -q custom_components tests
+git diff --check 297075d86360741ad9b3d122b23c3a20be38abfa HEAD
+
+# Separate worktree: the current tests/doubles load unchanged baseline production.
+git worktree add --detach ../atorch-baseline 297075d86360741ad9b3d122b23c3a20be38abfa
+ATORCH_SOURCE_ROOT=../atorch-baseline .venv/bin/python -W error tests/check_baseline_regressions.py
 ```
 
-Package installation requires the package index; **test execution is offline**.
-There is no need to install HA, Bleak, access Bluetooth, connect to an HA server,
-or wait for real timers. The isolated loader restores `sys.modules` after each
-scenario and closes unconsumed reconnect coroutines. The synthetic clock advances
-by the sleep duration; its budget cancels the watchdog deterministically.
+Package installation needs the package index. Test execution is offline: no HA,
+Bleak installation, Bluetooth adapter, household address or remote server needed.
+There are no real sleeps; asyncio tasks/futures are real, and a controlled monotonic
+scheduler supplies sleep completions and timer callbacks. Cancelled callbacks can
+be deliberately invoked to simulate an already-queued callback. The module loader
+restores `sys.modules`; harnesses must be run sequentially, not in concurrent threads.
 
-Executed on Python 3.11.15, Jinja2 3.1.6: existing parser suite **11 passed**;
-new characterization suite **11 passed**, with warnings treated as errors.
-The dedicated `BLE stale-data characterization` GitHub workflow runs both suites
-and the trace. The JSON trace is generated from execution, not a captured device
-session.
+Results executed locally: 11 parser tests and 38 availability tests passed with
+warnings as errors. The negative-control runner verifies exactly seven assertion
+failures and zero errors against unchanged master: P01, P04, P05, P06, P08, P20,
+P34. A missing API, import failure or teardown exception is not accepted as evidence.
+Its exit code 0 means the seven expected failures were demonstrated, not that the
+baseline is correct. The same assertions pass on this branch. The CI workflow runs
+both suites, trace, compile check and negative control on Python 3.11 and 3.14;
+CI results must be read at the exact published SHA, not inferred from local tests.
 
-## Observed default behavior (`update_interval=0`)
+## Coverage map (policy P01–P37)
 
-| Stage | Connected | Power available | Native W | Published state (double) | Listener publications | Monthly rendering |
-| --- | --- | --- | --- | --- | --- | --- |
-| Startup | false | false | null | unavailable | 0 | Indisponível |
-| Connected, no sample | true | false | null | unavailable | 0 | Indisponível |
-| Valid synthetic 100 W | true | true | 100 | 100.0 | 1 | 72,0 kWh/mês |
-| Unexpected disconnect | false | **true** | **100** | **100.0** | **1** | **72,0 kWh/mês** |
-| Reconnected, no new sample | true | **true** | **100** | **100.0** | **1** | **72,0 kWh/mês** |
-| New valid synthetic 200 W | true | true | 200 | 200.0 | 2 | 144,0 kWh/mês |
+Test method names carry the normative scenario IDs and expand variants via
+subtests. There are 37 policy IDs and one additional cleanup-race regression P29b.
 
-The disconnect test also compares availability/value pairs for **every sensor
-description** before/after the disconnect in AC Full mode. Previously available
-sensors remain available; mode-incompatible sensors remain unavailable.
+| IDs | Executed cases |
+|---|---|
+| P01–P03 | Initial 11 sensors/3 buttons, connect without data, first frame at t=0 with I=0/5/60 |
+| P04–P07 | Immediate disconnect publication, reconnect/no frame, recovery within throttle, partial/invalid packets |
+| P08–P11 | Exact 59.999/60/60.001 boundary, superseded deadline, same-session recovery, timer then watchdog |
+| P12–P16 | 1 s cadence for 180 s at I=0/5/60; gaps 1/2.5/5/10/59.999 s; identical data; junk/ACKs; no first frame |
+| P17–P19 | Immediate mode changes/all entities, disconnect and expiry in all modes/counter retention, valid zero and invalid projection input |
+| P20–P24 | Last-sample flush, expiry precedence, cancelled timers, simultaneous frame/expiry in both orders, early and delayed callbacks |
+| P25–P28 | Cross-session chunks, old client callbacks, frame during successful/failed subscription, single reconnect under overlapping triggers |
+| P29, P29b | Stop drains tasks/timers, idempotence, stop during suspended stop-notify and disconnect, no connected client left behind |
+| P30–P31 | Late connector return after stop, establish/subscribe failure then recovery |
+| P32–P34 | Option changes including zero, buttons/direct GATT guard and unchanged command format, coordinator errors respected |
+| P35–P37 | Civil-clock jumps, superseded flush in the same BLE session, actual public manual-refresh path and next-frame recovery |
 
-Additional executable controls:
+Independent read-only review repeated parser/regression tests and baseline controls.
+It found a cancellation race during detached-client cleanup. P29b first failed with
+`stop abandoned pending BLE close`; tracked, shielded cleanup plus explicit stop
+draining fixed it. P29b covers both BLE close suspension points and asserts actual
+client disconnection, not merely that tasks received cancel(). A second read-only
+review reran all tests and baseline controls, verified the repaired cleanup in
+additional cancellation scenarios, and found no remaining blocker in that scope.
+This expands the original doubles, whose BLE close methods never suspended.
 
-- Invalid notification type after reconnection leaves the old data, timestamp,
-  availability and publication count unchanged.
-- New valid DC-mode data makes the power entity unavailable (`native_value=None`),
-  and the template displays `Indisponível`, not zero.
-- Setting the coordinator's `last_update_success=False` does not affect the real
-  sensor's `available` override.
-- Watchdog at exactly 60 seconds does not reconnect (`elapsed > 60`, not `>=`).
-  At a simulated 61 seconds it reconnects, but does not invalidate retained power
-  or publish an unavailable transition.
-- With a 60-second publication throttle, the first new 200 W sample after
-  reconnection replaces `coordinator.data`/`native_value`, but the published double
-  state stays 100 W (72,0 kWh/mês). A subsequent 300 W sample at the throttle
-  boundary publishes and renders 216,0 kWh/mês. Merely reaching the boundary does
-  not itself publish: an incoming valid packet triggers the check.
-- `unknown`, `unavailable`, arbitrary text and nonfinite values render unavailable;
-  a genuine numeric zero renders 0,0. The template is not confusing unavailable
-  with zero; the problem is that its upstream input remains a valid-looking number.
+The pre-existing `_update_method` method is not the HA `_async_update_data` hook;
+manual refresh is not a polling acquisition path. P37 invokes `async_request_refresh`
+through a boundary double of HA's default hook/error behavior: it cannot restore
+invalid cache, and a valid current frame recovers immediately. This change does
+not claim to fix the unrelated manual-refresh hook or add polling.
 
-## Availability and publication flow
+## Projection trace and fixture provenance
 
-Line references below refer to the baseline, not a future fix:
+The executed trace feeds the real Jinja template from the state published by a
+listener double, not directly from a Python sensor property:
 
-1. `coordinator.py:153–185`: BLE chunks reassemble into a complete packet. A
-   successfully parsed packet refreshes `_last_data_time` and assigns `self.data`.
-   Only the throttle condition calls `async_set_updated_data(parsed)`, the
-   coordinator's push/listener path.
-2. `sensor.py:202–207`: availability only checks `coordinator.data is not None`
-   and whether the retained mode is supported. It neither calls the inherited
-   coordinator availability property nor consults `connected` or sample age.
-   `sensor.py:210–215` reads the value directly from the retained data.
-3. `coordinator.py:139–145`: `_on_disconnect` clears `_client` and schedules
-   `_reconnect` unless the disconnect is expected. It does **not** clear data,
-   change a success flag, or notify listeners. Thus both the property and an
-   already published state can stay available/numeric.
-4. `coordinator.py:147–151,90–124`: `_reconnect` waits 5 seconds, then `_connect`
-   subscribes and clears the partial buffer. `_connect` refreshes
-   `_last_data_time` even without a valid new sample. It neither invalidates old
-   data nor publishes a state transition. This timestamp is therefore not a
-   reliable last-valid-sample timestamp across reconnections.
-5. `coordinator.py:205–225`: the watchdog sleeps 60 seconds between checks and
-   reconnects when the elapsed time is **strictly greater than** 60 seconds. It
-   acts on the connection, not sensor availability; the silent-connection test
-   confirms retained data after the reconnect. The BLE double calls the real
-   disconnect callback during this path, which also queues `_reconnect`; queued
-   tasks are closed at teardown, not raced in the test.
-6. The next valid sample replaces the retained value. A nonzero throttle can
-   still defer the listener publication, so a property read and the last published
-   state can temporarily differ. This distinction must survive a future fix.
+| Stage | Published power | Projection |
+|---|---|---|
+| Startup / connected without data | unavailable | Indisponível |
+| Valid 100 W | 100.0 | 72,0 kWh/mês |
+| Disconnected | unavailable | Indisponível |
+| Reconnected without frame | unavailable | Indisponível |
+| New 200 W | 200.0 | 144,0 kWh/mês |
+| Deadline reached | unavailable | Indisponível |
+| New zero sample | 0.0 | 0,0 kWh/mês |
 
-`const.py:77–83` defines a 60-second notification watchdog, 5-second reconnect
-delay and zero/default publication throttle. These are **software constants**,
-not evidence of a measured physical notification cadence. The protocol says
-20+16 bytes per packet but does not establish a timing guarantee. No physical
-cadence, packet loss distribution or timeout policy is established by this task;
-the dependent policy task must make/justify that decision before a production fix.
+`tests/fixtures/monthly_estimate_pr1.jinja` is the unchanged `content` scalar from
+`examples/lovelace/server_room_monthly_estimate.yaml` at PR #1 commit
+`0eeaa3abbd4fbb789381afd94fc6e05436d04a08`. YAML indentation and the final newline
+are stripped to match `|-`. Fixture SHA-256:
+`78da073e3c94d3aa1c058579814e1fa9637eca54dcd9585f21e33fa3579f6b08`.
+The fixture does not deploy or import the monthly-estimate PR.
 
-## Projection provenance and limits
+## Limits and delivery
 
-`tests/fixtures/monthly_estimate_pr1.jinja` is a frozen copy of the `content` scalar
-from `examples/lovelace/server_room_monthly_estimate.yaml` in
-[PR #1](https://github.com/monrapps/atorch-at24-hass/pull/1), commit
-`0eeaa3abbd4fbb789381afd94fc6e05436d04a08`. Two-space YAML indentation and the final
-newline are stripped to match the YAML `|-` scalar. SHA-256 of the UTF-8 fixture:
+These are executed unit tests of real coordinator/parser/sensor/button code with
+HA/BLE boundaries replaced, not physical BLE, a full HA runtime/state-machine,
+recorder, frontend or firmware validation. The state publisher, refresh/error
+contract, template helpers and entity resolution are doubles. Template tests supply
+W units. No claim about kW conversions, HA version compatibility, recorder storage,
+real-time guarantees or actual device sampling accuracy is made. BLE cleanup still
+depends on the underlying transport eventually completing or raising; the doubles
+test controlled suspension/cancellation, not a permanently hung Bluetooth stack.
 
-`78da073e3c94d3aa1c058579814e1fa9637eca54dcd9585f21e33fa3579f6b08`
-
-The actual Jinja template is rendered, not a rewritten projection formula. Its
-`states`, `state_attr` and finite-number guard are offline doubles, modeled on
-that PR's own offline tests. The input is the last state published by the tiny
-listener double. Re-rendering after disconnect still sees `100.0` W and returns
-72,0 kWh/mês. In the actual frontend, absence of a state event can simply leave
-the already rendered text unchanged as well.
-
-This is a Markdown projection, not a newly available/unavailable HA sensor.
-The template checks numeric validity and W/kW units; it has no independent BLE
-connection/freshness information. It cannot distinguish the retained numeric
-reading from a fresh one. Do not fix this by converting stale readings to zero.
-
-Limitations: this is an executed unit-level reproduction plus code-flow tracing,
-**not** a physical disconnect test, full HA state-machine/recorder integration
-test, frontend rendering test or proof of real notification timing. The doubles
-only implement the boundary contracts needed here, not HA internals, concurrent
-reconnect races, event scheduling or hardware behavior. The loader mutates the
-process-global module table: run harnesses sequentially, not in concurrent threads.
-The projection double always supplies W; this suite does not validate kW/invalid
-units or HA entity resolution. No hardware, production configuration or production
-entity state was modified.
-
-An independent read-only review repeated both suites (11 + 11 passing tests) and
-the six-stage trace, confirmed execution of the real methods and exact fixture
-provenance, and reported no blocking finding. This does not expand the limits above.
-
-## Continuation
-
-Policy work belongs to `t_a4cb2def`; the production fix and regression expectations
-belong to its downstream implementation task. Preserve the disconnect/reconnect,
-invalid-data, mode, watchdog boundary and throttle distinctions when replacing
-these characterization assertions with the approved policy. The implementation
-must be a separate PR; this branch only provides reproduction, documentation and
-CI. Do not merge/deploy automatically.
+No household values, private endpoints, production configuration or hardware were
+used. No merge, auto-merge or deployment is part of this delivery. The implementation
+PR is separate from PR #1; downstream task `t_c900cd22` re-verifies it in a fresh run.

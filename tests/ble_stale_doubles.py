@@ -10,6 +10,7 @@ from contextlib import ExitStack
 from dataclasses import dataclass
 import importlib.util
 import math
+import os
 from pathlib import Path
 import sys
 from types import ModuleType, SimpleNamespace
@@ -18,40 +19,66 @@ from unittest.mock import patch
 from jinja2 import Environment, StrictUndefined
 
 ROOT = Path(__file__).resolve().parents[1]
+SOURCE_ROOT = Path(os.environ.get("ATORCH_SOURCE_ROOT", ROOT))
+
+
+class Timer:
+    """Keep callable/args so tests can execute an already-queued cancelled callback."""
+    def __init__(self, when, callback, args):
+        self.when = when
+        self.callback = callback
+        self.args = args
+        self.cancelled = False
+        self.fired = False
+
+    def cancel(self):
+        self.cancelled = True
+
+    def fire(self):
+        self.fired = True
+        self.callback(*self.args)
 
 
 class Clock:
     def __init__(self):
-        self.now = 1000.0
+        self.now = 0.0
         self.sleeps = []
-        self.sleep_budget: int | None = None
+        self.timers = []
 
     def time(self):
         return self.now
 
+    def call_at(self, when, callback, *args):
+        timer = Timer(when, callback, args)
+        self.timers.append(timer)
+        return timer
+
+    @property
+    def active(self):
+        return [t for t in self.timers if not t.cancelled and not t.fired]
+
+    def advance(self, target):
+        assert target >= self.now
+        while due := [t for t in self.active if t.when <= target]:
+            timer = min(due, key=lambda t: t.when)
+            self.now = max(self.now, timer.when)
+            timer.fire()
+        self.now = target
+
     async def sleep(self, seconds):
-        if self.sleep_budget is not None:
-            if self.sleep_budget == 0:
-                raise asyncio.CancelledError
-            self.sleep_budget -= 1
         self.sleeps.append(seconds)
-        self.now += seconds
+        future = asyncio.get_running_loop().create_future()
+        handle = self.call_at(self.now + seconds, future.set_result, None)
+        try:
+            await future
+        finally:
+            handle.cancel()
 
 
-class DeferredTask:
-    """Queue tasks without executing reconnects until the test requests it."""
-    def __init__(self, coroutine):
-        self.coroutine = coroutine
-
-    def cancel(self):
-        if self.coroutine is not None:
-            self.coroutine.close()
-            self.coroutine = None
-
-    async def run(self):
-        coroutine, self.coroutine = self.coroutine, None
-        assert coroutine is not None, "task already consumed or cancelled"
-        return await coroutine
+async def pump():
+    """Yield tasks/futures without sleeping in real time."""
+    for _ in range(12):
+        await asyncio.sleep(0)
 
 
 class HassDouble:
@@ -59,7 +86,7 @@ class HassDouble:
         self.tasks = []
 
     def async_create_task(self, coroutine):
-        task = DeferredTask(coroutine)
+        task = asyncio.create_task(coroutine)
         self.tasks.append(task)
         return task
 
@@ -69,9 +96,17 @@ class ClientDouble:
         self.is_connected = True
         self.disconnected_callback = disconnected_callback
         self.notification_callback = None
+        self.notify_hook = None
+        self.writes = []
+        self.close_count = 0
 
     async def start_notify(self, uuid, callback):
         self.notification_callback = callback
+        if self.notify_hook is not None:
+            await self.notify_hook(self)
+
+    async def write_gatt_char(self, uuid, command, *, response):
+        self.writes.append((uuid, command, response))
 
     async def stop_notify(self, uuid):
         self.notification_callback = None
@@ -81,6 +116,7 @@ class ClientDouble:
         self.disconnected_callback(self)
 
     async def disconnect(self):
+        self.close_count += 1
         self.drop()
 
     def emit(self, packet):
@@ -109,6 +145,24 @@ class DataUpdateCoordinatorDouble:
         self.data = data
         self.last_update_success = True
         self.async_update_listeners()
+
+    def async_set_update_error(self, error):
+        was_successful = self.last_update_success
+        self.last_update_success = False
+        if was_successful:
+            self.async_update_listeners()
+
+    async def _async_update_data(self):
+        # HA's actual default hook does not call a subclass's _update_method.
+        raise NotImplementedError("push-only coordinator has no update_method")
+
+    async def async_request_refresh(self):
+        try:
+            data = await self._async_update_data()
+        except Exception as error:
+            self.async_set_update_error(error)
+        else:
+            self.async_set_updated_data(data)
 
     def async_update_listeners(self):
         self.publications += 1
@@ -140,6 +194,17 @@ class SensorDescriptionDouble:
     icon: str | None = None
 
 
+@dataclass(frozen=True, kw_only=True)
+class ButtonDescriptionDouble:
+    key: str
+    translation_key: str
+    icon: str
+
+
+class UpdateFailed(Exception):
+    pass
+
+
 def module(name, **attributes):
     result = ModuleType(name)
     result.__path__ = []
@@ -168,10 +233,16 @@ class Harness:
         self.clients = []
         self.published_state = "unavailable"
         self.state_history = []
+        self.entity_history = []
+        self.notify_hook = None
+        self.establish_hook = None
 
     async def establish_connection(self, client_class, device, address, *, disconnected_callback):
         client = ClientDouble(disconnected_callback)
         self.clients.append(client)
+        client.notify_hook = self.notify_hook
+        if self.establish_hook is not None:
+            await self.establish_hook(client)
         return client
 
     def __enter__(self):
@@ -189,6 +260,10 @@ class Harness:
                 "SensorDeviceClass": labels("VOLTAGE", "CURRENT", "POWER", "ENERGY", "FREQUENCY", "POWER_FACTOR", "TEMPERATURE", "DURATION"),
                 "SensorStateClass": labels("MEASUREMENT", "TOTAL_INCREASING"),
             },
+            "homeassistant.components.button": {
+                "ButtonEntity": type("ButtonEntityDouble", (), {}),
+                "ButtonEntityDescription": ButtonDescriptionDouble,
+            },
             "homeassistant.config_entries": {"ConfigEntry": object},
             "homeassistant.const": {
                 "UnitOfElectricCurrent": SimpleNamespace(AMPERE="A"),
@@ -204,6 +279,7 @@ class Harness:
             "homeassistant.helpers.device_registry": {"DeviceInfo": dict},
             "homeassistant.helpers.entity_platform": {"AddEntitiesCallback": object},
             "homeassistant.helpers.update_coordinator": {
+                "UpdateFailed": UpdateFailed,
                 "DataUpdateCoordinator": DataUpdateCoordinatorDouble,
                 "CoordinatorEntity": CoordinatorEntityDouble,
             },
@@ -217,10 +293,10 @@ class Harness:
         self.stack.enter_context(patch.dict(sys.modules, stubs))
         try:
             loaded = {}
-            for name in ("const", "parser", "coordinator", "sensor"):
+            for name in ("const", "parser", "coordinator", "sensor", "button"):
                 full_name = f"_atorch_ble_stale.{name}"
                 spec = importlib.util.spec_from_file_location(
-                    full_name, ROOT / "custom_components" / "atorch_at24" / f"{name}.py"
+                    full_name, SOURCE_ROOT / "custom_components" / "atorch_at24" / f"{name}.py"
                 )
                 assert spec is not None and spec.loader is not None
                 obj = importlib.util.module_from_spec(spec)
@@ -228,11 +304,14 @@ class Harness:
                 spec.loader.exec_module(obj)
                 loaded[name] = obj
             self.const = loaded["const"]
+            self.parser = loaded["parser"]
             coordinator_module = loaded["coordinator"]
             # Replace this module's asyncio reference only, never the test runner's loop.
             coordinator_module.asyncio = SimpleNamespace(
                 Lock=asyncio.Lock, CancelledError=asyncio.CancelledError,
                 get_event_loop=lambda: self.clock, sleep=self.clock.sleep,
+                shield=asyncio.shield, gather=asyncio.gather,
+
             )
             self.coordinator = coordinator_module.AtorchBLECoordinator(
                 self.hass, "synthetic-device", "Synthetic AT24", self.update_interval
@@ -241,6 +320,10 @@ class Harness:
             self.sensors = {
                 desc.key: loaded["sensor"].AtorchSensorEntity(self.coordinator, entry, desc)
                 for desc in loaded["sensor"].SENSOR_DESCRIPTIONS
+            }
+            self.buttons = {
+                desc.key: loaded["button"].AtorchButtonEntity(self.coordinator, entry, desc)
+                for desc in loaded["button"].BUTTON_DESCRIPTIONS
             }
             self.power = self.sensors["power"]
             # This publisher is a double, not the real HA state machine/recorder.
@@ -263,6 +346,23 @@ class Harness:
             task.cancel()
         self.stack.close()
 
+    async def __aenter__(self):
+        return self.__enter__()
+
+    async def __aexit__(self, *exc):
+        try:
+            await self.coordinator.async_stop()
+            await pump()
+            assert all(t.done() for t in self.hass.tasks), "owned task survived stop"
+            assert not self.clock.active, "active timer survived stop"
+        finally:
+            self.__exit__(*exc)
+
+    async def advance(self, target):
+        await pump()
+        self.clock.advance(target)
+        await pump()
+
     def publish_power(self):
         value = self.power.native_value
         self.published_state = (
@@ -270,13 +370,21 @@ class Harness:
             else "unknown" if value is None else str(value)
         )
         self.state_history.append(self.published_state)
+        self.entity_history.append({
+            key: (sensor.available, sensor.native_value)
+            for key, sensor in self.sensors.items()
+        })
 
     def emit(self, watts=100, mode=1, notification_type=1):
         # Synthetic protocol packet: real reassembly, parse_notification and sensors.
+        self.clients[-1].emit(self.packet(watts, mode, notification_type))
+
+    @staticmethod
+    def packet(watts=100, mode=1, notification_type=1):
         packet = bytearray(36)
         packet[:4] = bytes((0xFF, 0x55, notification_type, mode))
         packet[10:13] = round(watts * 10).to_bytes(3, "big")
-        self.clients[-1].emit(packet)
+        return packet
 
     def projection(self):
         return self.template.render().splitlines()[0]

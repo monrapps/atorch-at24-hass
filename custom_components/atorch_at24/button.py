@@ -92,8 +92,15 @@ class AtorchButtonEntity(
             model="AT24",
         )
 
+    @property
+    def available(self) -> bool:
+        """Require a recent mode, even if the expiry callback is delayed."""
+        return super().available and self.coordinator.has_fresh_data
+
     async def async_press(self) -> None:
-        """Handle button press: send BLE command."""
+        """Handle button press: send BLE command only with a current sample."""
+        if not self.available:
+            return
         desc = self.entity_description
         # Use the current device mode (adu) from coordinator data, default to 3
         adu = 3
